@@ -14,8 +14,14 @@
 
 #define DEBUG 0
 
-#define ROS_DEPTH_PATH "/camera/depth/image_raw"
-#define FRAME_ID "depth_test"
+//#define ROS_DEPTH_PATH "/camera/depth/image_raw"
+//#define ROS_DEPTH_PATH "/camera/depth_registered/image_raw"
+#define ROS_DEPTH_PATH "/naoqi_driver_node/camera/depth/image_raw"
+//#define FRAME_ID "depth_test"
+#define FRAME_ID "CameraDepth_optical_frame"
+//#define FRAME_ID "CameraDepth_frame"
+//#define FRAME_ID "CameraDepth_depth_optical_frame"
+//#define FRAME_ID "camera_rgb_optical_frame"
 #define ROS_BUFFER_FRAMES 10
 
 using std::string;
@@ -30,8 +36,8 @@ static SkeltrackJointList list = NULL;
   * Be wary, no subsampling done, so you lose detail.
   * Values: 1 - 16 (you could go higher, but you wouldn't have a lot of image)
   */
-static char ENABLE_REDUCTION = 0;
-static unsigned char DIMENSION_REDUCTION = 1;
+static char ENABLE_REDUCTION = 1;
+static unsigned char DIMENSION_REDUCTION = 2;
 
 /**
   * Enables smoothing together multiple frames for less jitter
@@ -45,9 +51,9 @@ static float SMOOTHING_FACTOR = .0;
   * Filter out outlying depths by tweaking these thresholds.
   * Values: 0 - INT_MAX
   */
-static char ENABLE_THRESHOLD = 0;
+static char ENABLE_THRESHOLD = 1;
 static unsigned int THRESHOLD_BEGIN = 500;
-static unsigned int THRESHOLD_END   = 1500;
+static unsigned int THRESHOLD_END   = 1700;
 
 typedef struct
 {
@@ -84,7 +90,7 @@ static void on_track_joints (GObject      *obj,
 void publishTransforms(const string frame_id){
     SkeltrackJoint *head, *left_shoulder, *right_shoulder, *left_elbow, *right_elbow, *left_hand, *right_hand;
     
-    ROS_INFO("Pusing out joint data.");
+    ROS_INFO("Pushing out joint data.");
 
     head           = skeltrack_joint_list_get_joint(list, SKELTRACK_JOINT_ID_HEAD);
     left_shoulder  = skeltrack_joint_list_get_joint(list, SKELTRACK_JOINT_ID_LEFT_SHOULDER);
@@ -167,8 +173,9 @@ process_buffer (const std::vector<uint8_t> buffer,
     for (i = 0; i < reduced_width; i++) {
         for (j = 0; j < reduced_height; j++) {
             index = (j * width * dimension_factor + i * dimension_factor) * 2; //2 int8 in a int16
-            value = ((uint16_t)buffer[index+1])<<8 + buffer[index];
-            if (i == 0 && j == 0) ROS_INFO("%f", (float) value);
+            value = static_cast<uint16_t>(buffer[index+1]*256 + buffer[index]); 
+
+            //if (i == 0 && j == 0) ROS_INFO("%f", (float) value);
             if (ENABLE_THRESHOLD && (value < threshold_begin || value > threshold_end)) {
               reduced_buffer[j * reduced_width + i] = 0;
             } else {
@@ -192,54 +199,45 @@ process_buffer (const std::vector<uint8_t> buffer,
   *	dimage - Image struct containing mono uint16 data
   */
 static void onNewDepth(const sensor_msgs::Image& dimage){
+    GError *error = NULL;
+    BufferInfo* buffer_info;
+    //TODO: parameterize
+    unsigned char dimension_factor = DIMENSION_REDUCTION;
+    unsigned int thold_begin = THRESHOLD_BEGIN;
+    unsigned int thold_end = THRESHOLD_END;
+
+
     if (&dimage==NULL) {
         ROS_WARN_THROTTLE(1,"NULL image received.");
         return;
     }
     ROS_INFO_THROTTLE(1, "Received frame with %s encoding.", dimage.encoding.c_str());
     
-    BufferInfo* buffer_info;
-    //TODO: parameterize
-    unsigned char dimension_factor = DIMENSION_REDUCTION; 
-    unsigned int thold_begin = THRESHOLD_BEGIN;
-    unsigned int thold_end = THRESHOLD_END;
+
     buffer_info = process_buffer(dimage.data,
                                  dimage.width,
                                  dimage.height,
                                  dimension_factor,
                                  thold_begin,
                                  thold_end);
-                                 
+    //ROS_INFO_STREAM(buffer_info);
     // skeleton is global
-    skeltrack_skeleton_track_joints (skeleton,
-                                     (guint16*) buffer_info->reduced_buffer,
+    list = skeltrack_skeleton_track_joints_sync (skeleton,
+                                     buffer_info->reduced_buffer, //(guint16*)
                                      (guint16) buffer_info->reduced_width,
                                      (guint16) buffer_info->reduced_height,
                                      NULL,
-                                     on_track_joints,
-                                     buffer_info);
-    
-}
+                                     &error);
 
 
-static void
-on_track_joints (GObject      *obj,
-                 GAsyncResult *res,
-                 gpointer      user_data) {
-    GError *error = NULL;
-    BufferInfo* buffer_info = (BufferInfo*) user_data;
-   
-    ROS_INFO("Got joint data");
- 
-    list = skeltrack_skeleton_track_joints_finish (skeleton, res, &error);
-    
     if (error != NULL) {
         ROS_WARN("%s", error->message);
-        
-    } else {
+    } else if (list != NULL) {
        publishTransforms(FRAME_ID);
     }
-    
+    else {
+        ROS_INFO_STREAM(" --- skeleton not found");
+    }
     // Free memory, even if things go wrong.
     free(buffer_info->reduced_buffer);
     free(buffer_info);
